@@ -1,18 +1,7 @@
 #!/bin/sh
 
 # ============================================================
-# NetUsage Installer for OpenWrt
-# vnStat + LuCI NetUsage
-#
-# Features:
-# - Persistent vnStat database
-# - WAN auto detection
-# - Today usage
-# - Latest 3 calendar months
-# - Colourful LuCI UI
-# - MB / GB / TB display
-# - RPCD backend
-# - Boot recovery
+# NETUSAGE - OpenWrt vnStat + LuCI Data Usage
 # ============================================================
 
 set -e
@@ -26,47 +15,43 @@ ok() {
 }
 
 err() {
-    echo "[NetUsage] ERROR: $1" >&2
+    echo "[NetUsage] ERROR: $1"
 }
 
 # ------------------------------------------------------------
-# Package manager
+# Install vnStat
 # ------------------------------------------------------------
-
-if command -v apk >/dev/null 2>&1; then
-    PKG="apk"
-elif command -v opkg >/dev/null 2>&1; then
-    PKG="opkg"
-else
-    err "No supported package manager found"
-    exit 1
-fi
 
 log "Installing vnStat..."
 
-if [ "$PKG" = "apk" ]; then
+if command -v apk >/dev/null 2>&1; then
     apk update >/dev/null 2>&1 || true
     apk add vnstat
-else
+elif command -v opkg >/dev/null 2>&1; then
     opkg update >/dev/null 2>&1 || true
     opkg install vnstat
+else
+    err "No apk/opkg package manager found"
+    exit 1
 fi
 
 # ------------------------------------------------------------
 # Detect WAN interface
 # ------------------------------------------------------------
 
-WAN_IFACE="$(ubus call network.interface.wan status 2>/dev/null \
-    | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+WAN_IFACE="$(
+    ubus call network.interface.wan status 2>/dev/null \
+    | jsonfilter -e '@.l3_device' 2>/dev/null || true
+)"
 
 if [ -z "$WAN_IFACE" ]; then
-    WAN_IFACE="$(ip route 2>/dev/null \
-        | awk '/default/ {print $5; exit}')"
+    WAN_IFACE="$(
+        ip route 2>/dev/null \
+        | awk '/^default/ {print $5; exit}'
+    )"
 fi
 
-if [ -z "$WAN_IFACE" ]; then
-    WAN_IFACE="eth1"
-fi
+[ -z "$WAN_IFACE" ] && WAN_IFACE="eth1"
 
 log "WAN interface: $WAN_IFACE"
 
@@ -76,6 +61,22 @@ log "WAN interface: $WAN_IFACE"
 
 mkdir -p /etc/vnstat
 
+# Migrate old database if present
+if [ -d /var/lib/vnstat ]; then
+
+    for DB in /var/lib/vnstat/*; do
+        [ -e "$DB" ] || continue
+
+        BASENAME="$(basename "$DB")"
+
+        if [ ! -e "/etc/vnstat/$BASENAME" ]; then
+            mv "$DB" "/etc/vnstat/$BASENAME" 2>/dev/null || true
+        fi
+    done
+
+fi
+
+# Make sure config uses persistent location
 if [ -f /etc/vnstat.conf ]; then
 
     if grep -q '^DatabaseDir' /etc/vnstat.conf; then
@@ -94,30 +95,50 @@ EOF
 fi
 
 # ------------------------------------------------------------
-# Migrate old temporary database if present
+# vnStat update frequency
+#
+# Interface data:
+#   every 20 seconds
+#
+# Interface availability polling:
+#   every 5 seconds
+#
+# Database save:
+#   every 1 minute
 # ------------------------------------------------------------
 
-if [ -d /var/lib/vnstat ]; then
+if grep -q '^UpdateInterval' /etc/vnstat.conf; then
+    sed -i 's|^UpdateInterval.*|UpdateInterval 20|' \
+        /etc/vnstat.conf
+else
+    echo 'UpdateInterval 20' >> /etc/vnstat.conf
+fi
 
-    log "Checking existing vnStat database..."
+if grep -q '^PollInterval' /etc/vnstat.conf; then
+    sed -i 's|^PollInterval.*|PollInterval 5|' \
+        /etc/vnstat.conf
+else
+    echo 'PollInterval 5' >> /etc/vnstat.conf
+fi
 
-    for DB in /var/lib/vnstat/*; do
-        [ -f "$DB" ] || continue
-
-        cp -f "$DB" /etc/vnstat/ 2>/dev/null || true
-    done
-
+if grep -q '^SaveInterval' /etc/vnstat.conf; then
+    sed -i 's|^SaveInterval.*|SaveInterval 1|' \
+        /etc/vnstat.conf
+else
+    echo 'SaveInterval 1' >> /etc/vnstat.conf
 fi
 
 # ------------------------------------------------------------
-# Create vnStat database
+# Create WAN database if required
 # ------------------------------------------------------------
 
-if ! vnstat --iflist 2>/dev/null | grep -qw "$WAN_IFACE"; then
+log "Checking existing vnStat database..."
+
+if [ ! -e "/etc/vnstat/$WAN_IFACE" ]; then
 
     log "Creating vnStat database for $WAN_IFACE..."
 
-    vnstat --create -i "$WAN_IFACE" 2>/dev/null || true
+    vnstat --add -i "$WAN_IFACE" 2>/dev/null || true
 
 else
 
@@ -126,16 +147,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# Enable vnStat
-# ------------------------------------------------------------
-
-/etc/init.d/vnstat enable
-/etc/init.d/vnstat restart
-
-sleep 2
-
-# ------------------------------------------------------------
-# NetUsage configuration
+# UCI NetUsage configuration
 # ------------------------------------------------------------
 
 mkdir -p /etc/config
@@ -155,41 +167,30 @@ cat > /usr/libexec/rpcd/netusage <<'EOF'
 #!/bin/sh
 
 IFACE="$(uci -q get netusage.main.interface)"
-
 [ -z "$IFACE" ] && IFACE="eth1"
 
 case "$1" in
 
     list)
-
         echo '{"read":{}}'
-
         ;;
 
     call)
-
         case "$2" in
 
             read)
-
                 vnstat -i "$IFACE" --json 2>/dev/null
-
                 ;;
 
             *)
-
                 exit 1
-
                 ;;
 
         esac
-
         ;;
 
     *)
-
         exit 1
-
         ;;
 
 esac
@@ -206,16 +207,13 @@ mkdir -p /usr/share/rpcd/acl.d
 cat > /usr/share/rpcd/acl.d/luci-app-netusage.json <<'EOF'
 {
     "luci-app-netusage": {
-        "description": "NetUsage",
+        "description": "NetUsage data access",
         "read": {
             "ubus": {
                 "netusage": [
                     "read"
                 ]
-            },
-            "uci": [
-                "netusage"
-            ]
+            }
         }
     }
 }
@@ -231,10 +229,10 @@ cat > /usr/share/luci/menu.d/luci-app-netusage.json <<'EOF'
 {
     "admin/status/netusage": {
         "title": "Data Usage",
-        "order": 35,
+        "order": 20,
         "action": {
             "type": "view",
-            "path": "netusage"
+            "path": "status/netusage"
         },
         "depends": {
             "acl": [
@@ -246,17 +244,18 @@ cat > /usr/share/luci/menu.d/luci-app-netusage.json <<'EOF'
 EOF
 
 # ------------------------------------------------------------
-# LuCI view
+# LuCI JavaScript
 # ------------------------------------------------------------
 
-mkdir -p /www/luci-static/resources/view
+mkdir -p /www/luci-static/resources/view/status
 
-cat > /www/luci-static/resources/view/netusage.js <<'EOF'
+cat > /www/luci-static/resources/view/status/netusage.js <<'EOF'
 'use strict';
 
 'require view';
 'require rpc';
 'require ui';
+'require dom';
 
 var callNetUsage = rpc.declare({
     object: 'netusage',
@@ -264,18 +263,7 @@ var callNetUsage = rpc.declare({
     expect: {}
 });
 
-/*
- * vnStat 1.18 JSON reports traffic values in KiB.
- * Convert them to bytes before formatting.
- */
-var VNSTAT_UNIT = 1024;
-
-/* ============================================================
-   FORMAT MB / GB / TB ONLY
-   ============================================================ */
-
 function formatBytes(bytes) {
-
     bytes = Number(bytes || 0);
 
     var MB = 1024 * 1024;
@@ -291,676 +279,510 @@ function formatBytes(bytes) {
     return (bytes / MB).toFixed(2) + ' MB';
 }
 
-/* ============================================================
-   MONTH NAME
-   ============================================================ */
+function monthName(month) {
+    var names = [
+        '',
+        'January',
+        'February',
+        'March',
+        'April',
+        'May',
+        'June',
+        'July',
+        'August',
+        'September',
+        'October',
+        'November',
+        'December'
+    ];
 
-function monthName(year, month) {
-
-    var date = new Date(year, month - 1, 1);
-
-    return date.toLocaleString('default', {
-        month: 'long',
-        year: 'numeric'
-    });
+    return names[month] || '';
 }
 
-/* ============================================================
-   MONTH KEY
-   ============================================================ */
-
-function monthKey(year, month) {
-
-    return year + '-' +
-        String(month).padStart(2, '0');
+function getMonthKey(year, month) {
+    return String(year) + '-' + String(month).padStart(2, '0');
 }
 
-/* ============================================================
-   PREVIOUS MONTH
-   ============================================================ */
+function getTargetMonth(offset) {
+    var d = new Date();
 
-function previousMonth(year, month, offset) {
-
-    var date =
-        new Date(
-            year,
-            month - 1 - offset,
-            1
-        );
+    d.setDate(1);
+    d.setMonth(d.getMonth() - offset);
 
     return {
-        year: date.getFullYear(),
-        month: date.getMonth() + 1
+        year: d.getFullYear(),
+        month: d.getMonth() + 1
     };
 }
 
-/* ============================================================
-   TODAY DATA
-   ============================================================ */
+function card(title, value, cls, icon) {
+    return E('div', {
+        'class': 'netusage-card ' + cls
+    }, [
+        E('div', {
+            'class': 'netusage-card-icon'
+        }, icon),
 
-function getTodayData(iface) {
+        E('div', {
+            'class': 'netusage-card-title'
+        }, title),
 
-    var rx = 0;
-    var tx = 0;
-
-    /*
-     * vnStat days[0] = current calendar day.
-     * This gives the complete usage recorded today.
-     */
-
-    if (
-        iface &&
-        iface.traffic &&
-        Array.isArray(iface.traffic.days) &&
-        iface.traffic.days.length > 0
-    ) {
-
-        var today =
-            iface.traffic.days[0];
-
-        rx =
-            Number(today.rx || 0) *
-            VNSTAT_UNIT;
-
-        tx =
-            Number(today.tx || 0) *
-            VNSTAT_UNIT;
-
-    }
-
-    return {
-        rx: rx,
-        tx: tx
-    };
+        E('div', {
+            'class': 'netusage-card-value'
+        }, value)
+    ]);
 }
 
-/* ============================================================
-   MONTHLY DATA
-   ============================================================ */
+return view.extend({
 
-function getMonthlyData(
-    iface,
-    currentYear,
-    currentMonth
-) {
+    load: function() {
+        return callNetUsage();
+    },
 
-    var vnstatMonths = [];
+    render: function(data) {
 
-    if (
-        iface &&
-        iface.traffic &&
-        Array.isArray(iface.traffic.month)
-    ) {
+        var self = this;
 
-        vnstatMonths =
-            iface.traffic.month.map(function(m) {
+        var refreshTimer = null;
 
+        var selectedTab = 'today';
+
+        var root = E('div', {
+            'class': 'netusage-wrapper'
+        });
+
+        var tabs = E('div', {
+            'class': 'netusage-tabs'
+        });
+
+        var content = E('div', {
+            'class': 'netusage-content'
+        });
+
+        root.appendChild(tabs);
+        root.appendChild(content);
+
+        var style = E('style', {}, `
+            .netusage-wrapper {
+                width: 100%;
+            }
+
+            .netusage-tabs {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 18px;
+            }
+
+            .netusage-tab {
+                border: 1px solid #ccc;
+                border-radius: 10px;
+                padding: 9px 14px;
+                cursor: pointer;
+                font-weight: 600;
+                background: #f5f5f5;
+                transition: 0.2s;
+            }
+
+            .netusage-tab:hover {
+                transform: translateY(-1px);
+            }
+
+            .netusage-tab.active {
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            }
+
+            .tab-today {
+                border-color: #8e44ad;
+                background: #f5e9fb;
+                color: #6c3483;
+            }
+
+            .tab-month-1 {
+                border-color: #3498db;
+                background: #eaf5fd;
+                color: #21618c;
+            }
+
+            .tab-month-2 {
+                border-color: #27ae60;
+                background: #eafaf1;
+                color: #1e8449;
+            }
+
+            .tab-month-3 {
+                border-color: #e67e22;
+                background: #fdf2e9;
+                color: #a04000;
+            }
+
+            .netusage-cards {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 14px;
+            }
+
+            .netusage-card {
+                border-radius: 14px;
+                padding: 18px;
+                border: 2px solid;
+                min-height: 125px;
+                box-sizing: border-box;
+            }
+
+            .netusage-card-icon {
+                font-size: 28px;
+                margin-bottom: 8px;
+            }
+
+            .netusage-card-title {
+                font-size: 15px;
+                font-weight: 600;
+                margin-bottom: 7px;
+            }
+
+            .netusage-card-value {
+                font-size: 22px;
+                font-weight: 700;
+            }
+
+            .download-card {
+                border-color: #3498db;
+                background: #eaf5fd;
+                color: #21618c;
+            }
+
+            .upload-card {
+                border-color: #27ae60;
+                background: #eafaf1;
+                color: #1e8449;
+            }
+
+            .total-card {
+                border-color: #e67e22;
+                background: #fdf2e9;
+                color: #a04000;
+            }
+
+            .netusage-heading {
+                font-size: 20px;
+                font-weight: 700;
+                margin-bottom: 15px;
+            }
+
+            .netusage-updated {
+                margin-top: 15px;
+                font-size: 12px;
+                opacity: 0.65;
+            }
+
+            @media (max-width: 700px) {
+                .netusage-cards {
+                    grid-template-columns: 1fr;
+                }
+            }
+        `);
+
+        root.appendChild(style);
+
+        function extractTraffic(json) {
+
+            var iface = null;
+
+            if (
+                json &&
+                json.interfaces &&
+                json.interfaces.length
+            ) {
+                iface = json.interfaces[0];
+            }
+
+            if (!iface || !iface.traffic) {
                 return {
-                    year:
-                        Number(
-                            m.date.year
-                        ),
-
-                    month:
-                        Number(
-                            m.date.month
-                        ),
-
-                    rx:
-                        Number(m.rx || 0) *
-                        VNSTAT_UNIT,
-
-                    tx:
-                        Number(m.tx || 0) *
-                        VNSTAT_UNIT
+                    days: [],
+                    months: []
                 };
+            }
+
+            return {
+                days: iface.traffic.days || [],
+                months: iface.traffic.months || []
+            };
+        }
+
+        function buildData(json) {
+
+            var traffic = extractTraffic(json);
+
+            /*
+             * vnStat data on this OpenWrt build is exposed
+             * in KiB in the JSON response.
+             */
+            var SCALE = 1024;
+
+            var days = traffic.days.map(function(d) {
+                return {
+                    year: Number(d.date.year),
+                    month: Number(d.date.month),
+                    day: Number(d.date.day),
+                    rx: Number(d.rx || 0) * SCALE,
+                    tx: Number(d.tx || 0) * SCALE
+                };
+            });
+
+            var months = traffic.months.map(function(m) {
+                return {
+                    year: Number(m.date.year),
+                    month: Number(m.date.month),
+                    rx: Number(m.rx || 0) * SCALE,
+                    tx: Number(m.tx || 0) * SCALE
+                };
+            });
+
+            return {
+                days: days,
+                months: months
+            };
+        }
+
+        function getToday(data) {
+
+            var now = new Date();
+
+            var year = now.getFullYear();
+            var month = now.getMonth() + 1;
+            var day = now.getDate();
+
+            var found = null;
+
+            data.days.forEach(function(d) {
+
+                if (
+                    d.year === year &&
+                    d.month === month &&
+                    d.day === day
+                ) {
+                    found = d;
+                }
 
             });
 
-    }
+            if (!found) {
+                return {
+                    rx: 0,
+                    tx: 0,
+                    total: 0
+                };
+            }
 
-    var months = [];
+            return {
+                rx: found.rx,
+                tx: found.tx,
+                total: found.rx + found.tx
+            };
+        }
 
-    /*
-     * Exactly:
-     * 1 = current month
-     * 2 = previous month
-     * 3 = previous previous month
-     */
+        function getMonthData(data, target) {
 
-    for (var i = 0; i < 3; i++) {
+            var found = null;
 
-        var target =
-            previousMonth(
-                currentYear,
-                currentMonth,
-                i
-            );
-
-        var found = null;
-
-        vnstatMonths.forEach(
-            function(m) {
+            data.months.forEach(function(m) {
 
                 if (
                     m.year === target.year &&
                     m.month === target.month
                 ) {
-
                     found = m;
-
                 }
 
-            }
-        );
-
-        /*
-         * If the month has no data yet,
-         * create it with zero usage.
-         */
-
-        if (!found) {
-
-            found = {
-                year: target.year,
-                month: target.month,
-                rx: 0,
-                tx: 0
-            };
-
-        }
-
-        months.push(found);
-
-    }
-
-    return months;
-}
-
-/* ============================================================
-   TAB STYLE
-   ============================================================ */
-
-function tabStyle(
-    color,
-    background,
-    active
-) {
-
-    return [
-        'border:2px solid ' + color,
-        'border-radius:10px',
-        'padding:9px 16px',
-        'cursor:pointer',
-        'font-weight:600',
-        'font-size:14px',
-        'color:' +
-            (active ? '#ffffff' : color),
-        'background:' +
-            (active ? color : background),
-        'transition:all .2s ease'
-    ].join(';');
-}
-
-/* ============================================================
-   COLOURFUL USAGE CARDS
-   ============================================================ */
-
-function renderCards(rx, tx) {
-
-    var total =
-        Number(rx || 0) +
-        Number(tx || 0);
-
-    var html = '';
-
-    html +=
-        '<div style="' +
-        'display:grid;' +
-        'grid-template-columns:' +
-        'repeat(3,minmax(0,1fr));' +
-        'gap:14px;' +
-        'margin-top:10px;' +
-        '">';
-
-    /* --------------------------------------------------------
-       DOWNLOAD
-       -------------------------------------------------------- */
-
-    html +=
-        '<div style="' +
-        'border:2px solid #2196f3;' +
-        'border-radius:12px;' +
-        'padding:16px;' +
-        'text-align:center;' +
-        'background:rgba(33,150,243,0.15);' +
-        '">';
-
-    html +=
-        '<div style="font-size:28px;">📥</div>';
-
-    html +=
-        '<div style="' +
-        'font-weight:600;' +
-        'margin:6px 0;' +
-        'color:#42a5f5;' +
-        '">Download</div>';
-
-    html +=
-        '<strong style="font-size:20px;">' +
-        formatBytes(rx) +
-        '</strong>';
-
-    html += '</div>';
-
-    /* --------------------------------------------------------
-       UPLOAD
-       -------------------------------------------------------- */
-
-    html +=
-        '<div style="' +
-        'border:2px solid #4caf50;' +
-        'border-radius:12px;' +
-        'padding:16px;' +
-        'text-align:center;' +
-        'background:rgba(76,175,80,0.15);' +
-        '">';
-
-    html +=
-        '<div style="font-size:28px;">📤</div>';
-
-    html +=
-        '<div style="' +
-        'font-weight:600;' +
-        'margin:6px 0;' +
-        'color:#66bb6a;' +
-        '">Upload</div>';
-
-    html +=
-        '<strong style="font-size:20px;">' +
-        formatBytes(tx) +
-        '</strong>';
-
-    html += '</div>';
-
-    /* --------------------------------------------------------
-       TOTAL
-       -------------------------------------------------------- */
-
-    html +=
-        '<div style="' +
-        'border:2px solid #ff9800;' +
-        'border-radius:12px;' +
-        'padding:16px;' +
-        'text-align:center;' +
-        'background:rgba(255,152,0,0.15);' +
-        '">';
-
-    html +=
-        '<div style="font-size:28px;">📊</div>';
-
-    html +=
-        '<div style="' +
-        'font-weight:600;' +
-        'margin:6px 0;' +
-        'color:#ffa726;' +
-        '">Total</div>';
-
-    html +=
-        '<strong style="font-size:20px;">' +
-        formatBytes(total) +
-        '</strong>';
-
-    html += '</div>';
-
-    html += '</div>';
-
-    return html;
-}
-
-/* ============================================================
-   MAIN RENDER
-   ============================================================ */
-
-function renderUsage(
-    data,
-    selectedKey
-) {
-
-    var now = new Date();
-
-    var currentYear =
-        now.getFullYear();
-
-    var currentMonth =
-        now.getMonth() + 1;
-
-    var iface =
-        data &&
-        data.interfaces &&
-        data.interfaces[0];
-
-    var months =
-        getMonthlyData(
-            iface,
-            currentYear,
-            currentMonth
-        );
-
-    var today =
-        getTodayData(iface);
-
-    var html = '';
-
-    html +=
-        '<div class="cbi-section">';
-
-    html +=
-        '<h2>Data Usage</h2>';
-
-    /* ========================================================
-       TABS
-       ======================================================== */
-
-    html +=
-        '<div style="' +
-        'display:flex;' +
-        'gap:8px;' +
-        'flex-wrap:wrap;' +
-        'margin-bottom:20px;' +
-        '">';
-
-    /*
-     * TODAY TAB
-     */
-
-    var todayActive =
-        selectedKey === 'today';
-
-    html +=
-        '<button ' +
-        'data-month="today" ' +
-        'style="' +
-        tabStyle(
-            '#ab47bc',
-            'rgba(171,71,188,0.12)',
-            todayActive
-        ) +
-        '">';
-
-    html += '🕐 Today';
-
-    html += '</button>';
-
-    /*
-     * MONTH TAB COLOURS
-     */
-
-    var tabColors = [
-
-        {
-            color: '#2196f3',
-            bg: 'rgba(33,150,243,0.12)'
-        },
-
-        {
-            color: '#4caf50',
-            bg: 'rgba(76,175,80,0.12)'
-        },
-
-        {
-            color: '#ff9800',
-            bg: 'rgba(255,152,0,0.12)'
-        }
-
-    ];
-
-    /*
-     * MONTH TABS
-     */
-
-    months.forEach(
-        function(m, index) {
-
-            var year =
-                Number(m.year);
-
-            var month =
-                Number(m.month);
-
-            var key =
-                monthKey(
-                    year,
-                    month
-                );
-
-            var active =
-                key === selectedKey;
-
-            html +=
-                '<button ' +
-                'data-month="' +
-                key +
-                '" ' +
-                'style="' +
-                tabStyle(
-                    tabColors[index].color,
-                    tabColors[index].bg,
-                    active
-                ) +
-                '">';
-
-            html +=
-                monthName(
-                    year,
-                    month
-                ) +
-                ' #' +
-                (index + 1);
-
-            html += '</button>';
-
-        }
-    );
-
-    html += '</div>';
-
-    /* ========================================================
-       TODAY VIEW
-       ======================================================== */
-
-    if (selectedKey === 'today') {
-
-        html +=
-            '<div style="' +
-            'margin-bottom:12px;' +
-            'font-size:16px;' +
-            'font-weight:600;' +
-            '">';
-
-        html +=
-            '🕐 Today — 24 Hour Usage';
-
-        html += '</div>';
-
-        html +=
-            renderCards(
-                today.rx,
-                today.tx
-            );
-
-    }
-
-    /* ========================================================
-       MONTH VIEW
-       ======================================================== */
-
-    else {
-
-        var selected = null;
-
-        months.forEach(
-            function(m) {
-
-                var key =
-                    monthKey(
-                        Number(m.year),
-                        Number(m.month)
-                    );
-
-                if (
-                    key === selectedKey
-                ) {
-
-                    selected = m;
-
-                }
-
-            }
-        );
-
-        if (!selected)
-            selected = months[0];
-
-        html +=
-            '<div style="' +
-            'margin-bottom:12px;' +
-            'font-size:16px;' +
-            'font-weight:600;' +
-            '">';
-
-        html +=
-            '📅 ' +
-            monthName(
-                Number(selected.year),
-                Number(selected.month)
-            );
-
-        html += '</div>';
-
-        html +=
-            renderCards(
-                Number(selected.rx || 0),
-                Number(selected.tx || 0)
-            );
-
-    }
-
-    html += '</div>';
-
-    return html;
-}
-
-/* ============================================================
-   LUCI VIEW
-   ============================================================ */
-
-return view.extend({
-
-    load: function() {
-
-        return callNetUsage();
-
-    },
-
-    render: function() {
-
-        var root =
-            E('div', {
-                'class': 'cbi-map'
             });
 
-        /*
-         * Default tab = Today
-         */
+            if (!found) {
+                return {
+                    rx: 0,
+                    tx: 0,
+                    total: 0
+                };
+            }
 
-        var selectedKey =
-            'today';
+            return {
+                rx: found.rx,
+                tx: found.tx,
+                total: found.rx + found.tx
+            };
+        }
 
-        function bindButtons() {
+        function renderTabs() {
 
-            root.querySelectorAll(
-                '[data-month]'
-            ).forEach(
-                function(button) {
+            while (tabs.firstChild)
+                tabs.removeChild(tabs.firstChild);
 
-                    button.addEventListener(
-                        'click',
-                        function() {
-
-                            selectedKey =
-                                button.getAttribute(
-                                    'data-month'
-                                );
-
-                            refresh();
-
-                        }
-                    );
-
+            var todayTab = E('button', {
+                'class':
+                    'netusage-tab tab-today' +
+                    (selectedTab === 'today' ? ' active' : ''),
+                'click': function() {
+                    selectedTab = 'today';
+                    renderCurrent();
                 }
+            }, '📅 Today');
+
+            tabs.appendChild(todayTab);
+
+            for (var i = 0; i < 3; i++) {
+
+                var target = getTargetMonth(i);
+
+                var number = i + 1;
+
+                var tab = E('button', {
+                    'class':
+                        'netusage-tab tab-month-' + number +
+                        (selectedTab === 'month' + number ? ' active' : ''),
+                    'click': (function(index) {
+
+                        return function() {
+                            selectedTab = 'month' + (index + 1);
+                            renderCurrent();
+                        };
+
+                    })(i)
+                }, [
+                    '📊 ',
+                    monthName(target.month),
+                    ' #',
+                    String(number)
+                ]);
+
+                tabs.appendChild(tab);
+            }
+        }
+
+        function renderCurrent(json) {
+
+            if (json)
+                data = buildData(json);
+
+            renderTabs();
+
+            while (content.firstChild)
+                content.removeChild(content.firstChild);
+
+            var rx = 0;
+            var tx = 0;
+            var total = 0;
+            var heading = '';
+
+            if (selectedTab === 'today') {
+
+                var today = getToday(data);
+
+                rx = today.rx;
+                tx = today.tx;
+                total = today.total;
+
+                heading = 'Today';
+
+            } else {
+
+                var index =
+                    Number(
+                        selectedTab.replace('month', '')
+                    ) - 1;
+
+                var target = getTargetMonth(index);
+
+                var month = getMonthData(data, target);
+
+                rx = month.rx;
+                tx = month.tx;
+                total = month.total;
+
+                heading =
+                    monthName(target.month) +
+                    ' ' +
+                    target.year;
+
+            }
+
+            content.appendChild(
+                E('div', {
+                    'class': 'netusage-heading'
+                }, heading)
             );
 
+            content.appendChild(
+                E('div', {
+                    'class': 'netusage-cards'
+                }, [
+                    card(
+                        'Download',
+                        formatBytes(rx),
+                        'download-card',
+                        '📥'
+                    ),
+
+                    card(
+                        'Upload',
+                        formatBytes(tx),
+                        'upload-card',
+                        '📤'
+                    ),
+
+                    card(
+                        'Total',
+                        formatBytes(total),
+                        'total-card',
+                        '📊'
+                    )
+                ])
+            );
+
+            content.appendChild(
+                E('div', {
+                    'class': 'netusage-updated'
+                }, 'Auto refresh: every 20 seconds')
+            );
         }
 
         function refresh() {
 
-            return callNetUsage()
+            callNetUsage().then(function(json) {
 
-                .then(
-                    function(data) {
+                data = buildData(json);
 
-                        root.innerHTML =
-                            renderUsage(
-                                data,
-                                selectedKey
-                            );
+                renderCurrent();
 
-                        bindButtons();
+            }).catch(function(err) {
 
-                    }
-                )
-
-                .catch(
-                    function(error) {
-
-                        root.innerHTML =
-                            '<div class="alert-message">' +
-                            'Unable to load data usage.' +
-                            '</div>';
-
-                        console.error(
-                            'NetUsage RPC error:',
-                            error
-                        );
-
-                    }
+                console.error(
+                    'NetUsage refresh failed:',
+                    err
                 );
+
+            });
 
         }
 
-        refresh();
+        renderCurrent();
 
-        /*
-         * Auto refresh every 10 seconds
-         */
+        this.refreshTimer = setInterval(
+            refresh,
+            20000
+        );
 
-        this.refreshTimer =
-            setInterval(
-                refresh,
-                10000
-            );
+        this.addNotification = function() {};
 
         return root;
-
     },
 
-    /*
-     * Properly stop refresh timer
-     * when LuCI view is removed.
-     */
+    handleSaveApply: null,
 
-    remove: function() {
+    handleSave: null,
+
+    handleReset: null,
+
+    destroy: function() {
 
         if (this.refreshTimer) {
 
@@ -969,14 +791,13 @@ return view.extend({
             );
 
             this.refreshTimer = null;
-
         }
 
-    },
-
-    handleSaveApply: null,
-    handleSave: null,
-    handleReset: null
+        return view.prototype.destroy.apply(
+            this,
+            arguments
+        );
+    }
 
 });
 EOF
@@ -985,100 +806,141 @@ EOF
 # Boot recovery service
 # ------------------------------------------------------------
 
+mkdir -p /etc/init.d
+
 cat > /etc/init.d/vnstat-netusage <<'EOF'
 #!/bin/sh /etc/rc.common
 
 START=99
-USE_PROCD=0
+STOP=10
 
 start() {
 
     (
         sleep 15
 
-        WAN_IFACE="$(ubus call network.interface.wan status 2>/dev/null \
-            | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+        WAN_IFACE="$(
+            ubus call network.interface.wan status 2>/dev/null \
+            | jsonfilter -e '@.l3_device' 2>/dev/null || true
+        )"
 
         if [ -z "$WAN_IFACE" ]; then
-            WAN_IFACE="$(ip route 2>/dev/null \
-                | awk '/default/ {print $5; exit}')"
+            WAN_IFACE="$(
+                ip route 2>/dev/null \
+                | awk '/^default/ {print $5; exit}'
+            )"
         fi
 
         [ -z "$WAN_IFACE" ] && WAN_IFACE="eth1"
 
         mkdir -p /etc/vnstat
 
+        # Persistent database
         if [ -f /etc/vnstat.conf ]; then
 
             if grep -q '^DatabaseDir' /etc/vnstat.conf; then
-
                 sed -i \
                     's|^DatabaseDir.*|DatabaseDir "/etc/vnstat"|' \
                     /etc/vnstat.conf
-
             else
-
                 echo 'DatabaseDir "/etc/vnstat"' \
                     >> /etc/vnstat.conf
-
             fi
 
         else
 
-            echo 'DatabaseDir "/etc/vnstat"' \
-                > /etc/vnstat.conf
+            cat > /etc/vnstat.conf <<'CFG'
+DatabaseDir "/etc/vnstat"
+CFG
 
         fi
 
-        if ! vnstat --iflist 2>/dev/null \
-            | grep -qw "$WAN_IFACE"; then
-
-            vnstat --create \
-                -i "$WAN_IFACE" \
-                2>/dev/null || true
-
+        # Keep vnStat fast and UI responsive
+        if grep -q '^UpdateInterval' /etc/vnstat.conf; then
+            sed -i \
+                's|^UpdateInterval.*|UpdateInterval 20|' \
+                /etc/vnstat.conf
+        else
+            echo 'UpdateInterval 20' \
+                >> /etc/vnstat.conf
         fi
 
+        if grep -q '^PollInterval' /etc/vnstat.conf; then
+            sed -i \
+                's|^PollInterval.*|PollInterval 5|' \
+                /etc/vnstat.conf
+        else
+            echo 'PollInterval 5' \
+                >> /etc/vnstat.conf
+        fi
+
+        if grep -q '^SaveInterval' /etc/vnstat.conf; then
+            sed -i \
+                's|^SaveInterval.*|SaveInterval 1|' \
+                /etc/vnstat.conf
+        else
+            echo 'SaveInterval 1' \
+                >> /etc/vnstat.conf
+        fi
+
+        # Create DB if missing
+        if [ ! -e "/etc/vnstat/$WAN_IFACE" ]; then
+            vnstat --add -i "$WAN_IFACE" \
+                >/dev/null 2>&1 || true
+        fi
+
+        # Update UCI
         uci set netusage.main.interface="$WAN_IFACE"
         uci commit netusage
 
-        /etc/init.d/vnstat restart
+        /etc/init.d/vnstat restart \
+            >/dev/null 2>&1 || true
 
     ) &
 
 }
 
 stop() {
-    return 0
+    :
 }
 EOF
 
 chmod +x /etc/init.d/vnstat-netusage
 
-/etc/init.d/vnstat-netusage enable
-
 # ------------------------------------------------------------
-# Restart LuCI services
+# Enable services
 # ------------------------------------------------------------
 
-/etc/init.d/rpcd restart 2>/dev/null || true
-/etc/init.d/uhttpd restart 2>/dev/null || true
+/etc/init.d/vnstat enable >/dev/null 2>&1 || true
+/etc/init.d/vnstat restart >/dev/null 2>&1 || true
 
-rm -rf /tmp/luci-indexcache* 2>/dev/null || true
-rm -rf /tmp/luci-modulecache* 2>/dev/null || true
+/etc/init.d/vnstat-netusage enable >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------
-# Final
+# Restart RPC/UI
+# ------------------------------------------------------------
+
+/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+
+# Clear LuCI cache
+rm -rf /tmp/luci-* 2>/dev/null || true
+
+# ------------------------------------------------------------
+# Final status
 # ------------------------------------------------------------
 
 ok "NetUsage installed"
 ok "vnStat database: /etc/vnstat"
 ok "WAN interface: $WAN_IFACE"
-ok "Today usage enabled"
+ok "Update interval: 20 seconds"
+ok "Poll interval: 5 seconds"
+ok "Save interval: 1 minute"
+ok "UI refresh: 20 seconds"
+ok "Today tab enabled"
 ok "Latest 3 calendar months enabled"
 ok "Current month auto-created when empty"
-ok "MB / GB / TB display enabled"
-ok "Colourful UI enabled"
+ok "Midnight daily/monthly rollover handled by vnStat"
 ok "Boot recovery service enabled"
 
 exit 0
