@@ -36,7 +36,7 @@ else
 fi
 
 # ============================================================
-# DETECT WAN INTERFACE
+# DETECT WAN
 # ============================================================
 
 WAN_IFACE="$(
@@ -56,16 +56,17 @@ fi
 log "WAN interface: $WAN_IFACE"
 
 # ============================================================
-# PERSISTENT VNSTAT DATABASE
+# PERSISTENT DATABASE
 # ============================================================
 
 mkdir -p /etc/vnstat
 
-# Migrate old database if it exists.
-# Existing /etc/vnstat data is NEVER deleted.
+# Migrate old database only if destination does not exist.
+# NEVER delete existing /etc/vnstat data.
 if [ -d /var/lib/vnstat ]; then
 
     for DB in /var/lib/vnstat/*; do
+
         [ -e "$DB" ] || continue
 
         BASENAME="$(basename "$DB")"
@@ -73,6 +74,7 @@ if [ -d /var/lib/vnstat ]; then
         if [ ! -e "/etc/vnstat/$BASENAME" ]; then
             mv "$DB" "/etc/vnstat/$BASENAME" 2>/dev/null || true
         fi
+
     done
 
 fi
@@ -101,7 +103,7 @@ EOF
 fi
 
 # ------------------------------------------------------------
-# Update traffic every 20 seconds
+# Update every 20 seconds
 # ------------------------------------------------------------
 
 if grep -q '^UpdateInterval' /etc/vnstat.conf; then
@@ -114,7 +116,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# Poll interface every 5 seconds
+# Poll every 5 seconds
 # ------------------------------------------------------------
 
 if grep -q '^PollInterval' /etc/vnstat.conf; then
@@ -127,7 +129,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# Save database every 1 minute
+# Save every 1 minute
 # ------------------------------------------------------------
 
 if grep -q '^SaveInterval' /etc/vnstat.conf; then
@@ -136,6 +138,20 @@ if grep -q '^SaveInterval' /etc/vnstat.conf; then
         /etc/vnstat.conf
 else
     echo 'SaveInterval 1' \
+        >> /etc/vnstat.conf
+fi
+
+# ------------------------------------------------------------
+# Keep enough daily records for 3 month view
+# Current month + previous 2 months
+# ------------------------------------------------------------
+
+if grep -q '^DailyDays' /etc/vnstat.conf; then
+    sed -i \
+        's|^DailyDays.*|DailyDays 93|' \
+        /etc/vnstat.conf
+else
+    echo 'DailyDays 93' \
         >> /etc/vnstat.conf
 fi
 
@@ -159,7 +175,7 @@ else
 fi
 
 # ============================================================
-# NETUSAGE UCI CONFIG
+# NETUSAGE UCI
 # ============================================================
 
 mkdir -p /etc/config
@@ -265,9 +281,9 @@ cat > /www/luci-static/resources/view/status/netusage.js <<'EOF'
 'require view';
 'require rpc';
 
-/* ==========================================================
+/* ============================================================
  * RPC
- * ========================================================== */
+ * ============================================================ */
 
 var callNetUsage = rpc.declare({
     object: 'netusage',
@@ -275,9 +291,9 @@ var callNetUsage = rpc.declare({
     expect: {}
 });
 
-/* ==========================================================
- * FORMAT BYTES
- * ========================================================== */
+/* ============================================================
+ * FORMAT
+ * ============================================================ */
 
 function formatBytes(bytes) {
 
@@ -296,9 +312,9 @@ function formatBytes(bytes) {
     return (bytes / MB).toFixed(2) + ' MB';
 }
 
-/* ==========================================================
+/* ============================================================
  * MONTH NAMES
- * ========================================================== */
+ * ============================================================ */
 
 function monthName(month) {
 
@@ -321,9 +337,9 @@ function monthName(month) {
     return names[month] || '';
 }
 
-/* ==========================================================
- * GET CURRENT / PREVIOUS MONTH
- * ========================================================== */
+/* ============================================================
+ * TARGET MONTH
+ * ============================================================ */
 
 function getTargetMonth(offset) {
 
@@ -338,16 +354,30 @@ function getTargetMonth(offset) {
     };
 }
 
-/* ==========================================================
+/* ============================================================
+ * DAYS IN ACTUAL CALENDAR MONTH
+ * ============================================================ */
+
+function daysInMonth(year, month) {
+
+    return new Date(
+        year,
+        month,
+        0
+    ).getDate();
+}
+
+/* ============================================================
  * CONVERT VNSTAT JSON
  *
- * vnStat 1.18 on this build reports rx/tx in KiB.
- * KiB -> Bytes = * 1024
- * ========================================================== */
+ * vnStat 1.18 JSON on this build:
+ * rx/tx = KiB
+ *
+ * KiB -> Bytes
+ * ============================================================ */
 
 function buildData(json) {
 
-    /* Never allow undefined arrays */
     if (!json || typeof json !== 'object') {
 
         return {
@@ -386,13 +416,15 @@ function buildData(json) {
         };
     }
 
-    var rawDays = Array.isArray(iface.traffic.days)
-        ? iface.traffic.days
-        : [];
+    var rawDays =
+        Array.isArray(iface.traffic.days)
+            ? iface.traffic.days
+            : [];
 
-    var rawMonths = Array.isArray(iface.traffic.months)
-        ? iface.traffic.months
-        : [];
+    var rawMonths =
+        Array.isArray(iface.traffic.months)
+            ? iface.traffic.months
+            : [];
 
     var SCALE = 1024;
 
@@ -427,9 +459,9 @@ function buildData(json) {
     };
 }
 
-/* ==========================================================
+/* ============================================================
  * CARD
- * ========================================================== */
+ * ============================================================ */
 
 function makeCard(title, value, cls, icon) {
 
@@ -452,9 +484,9 @@ function makeCard(title, value, cls, icon) {
     ]);
 }
 
-/* ==========================================================
+/* ============================================================
  * VIEW
- * ========================================================== */
+ * ============================================================ */
 
 return view.extend({
 
@@ -467,11 +499,7 @@ return view.extend({
 
         var self = this;
 
-        /*
-         * IMPORTANT:
-         * Convert initial RPC response FIRST.
-         * This fixes the original forEach/undefined crash.
-         */
+        /* Initial data is converted BEFORE use */
         var data = buildData(initialJson);
 
         var selectedTab = 'today';
@@ -488,9 +516,9 @@ return view.extend({
             'class': 'netusage-content'
         });
 
-        /* ==================================================
+        /* ====================================================
          * CSS
-         * ================================================== */
+         * ==================================================== */
 
         var style = E('style', {}, `
 
@@ -551,6 +579,7 @@ return view.extend({
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
                 gap: 14px;
+                margin-bottom: 22px;
             }
 
             .netusage-card {
@@ -607,6 +636,60 @@ return view.extend({
                 opacity: 0.65;
             }
 
+            .netusage-daily-title {
+                font-size: 18px;
+                font-weight: 700;
+                margin: 10px 0 12px 0;
+            }
+
+            .netusage-daily-table-wrapper {
+                width: 100%;
+                overflow-x: auto;
+                border-radius: 10px;
+                border: 1px solid #ddd;
+            }
+
+            .netusage-daily-table {
+                width: 100%;
+                border-collapse: collapse;
+                min-width: 520px;
+            }
+
+            .netusage-daily-table th,
+            .netusage-daily-table td {
+                padding: 11px 12px;
+                text-align: right;
+                border-bottom: 1px solid #e5e5e5;
+            }
+
+            .netusage-daily-table th:first-child,
+            .netusage-daily-table td:first-child {
+                text-align: left;
+            }
+
+            .netusage-daily-table th {
+                font-weight: 700;
+                background: #f5f5f5;
+            }
+
+            .netusage-daily-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .netusage-daily-date {
+                font-weight: 600;
+            }
+
+            .netusage-daily-total {
+                font-weight: 700;
+            }
+
+            .netusage-no-data {
+                padding: 15px;
+                text-align: center;
+                opacity: 0.65;
+            }
+
             @media (max-width: 700px) {
 
                 .netusage-cards {
@@ -621,9 +704,9 @@ return view.extend({
         root.appendChild(tabs);
         root.appendChild(content);
 
-        /* ==================================================
+        /* ====================================================
          * TODAY
-         * ================================================== */
+         * ==================================================== */
 
         function getToday() {
 
@@ -658,9 +741,9 @@ return view.extend({
             };
         }
 
-        /* ==================================================
-         * MONTH
-         * ================================================== */
+        /* ====================================================
+         * MONTH SUMMARY
+         * ==================================================== */
 
         function getMonthData(target) {
 
@@ -688,19 +771,205 @@ return view.extend({
             };
         }
 
-        /* ==================================================
+        /* ====================================================
+         * GET DAILY DATA FOR SELECTED MONTH
+         * ==================================================== */
+
+        function getDailyData(target) {
+
+            var result = [];
+
+            /*
+             * Actual number of days:
+             *
+             * Feb 2026 = 28
+             * Feb leap year = 29
+             * 30-day month = 30
+             * 31-day month = 31
+             */
+
+            var totalDays =
+                daysInMonth(
+                    target.year,
+                    target.month
+                );
+
+            /*
+             * Current month:
+             * only show dates up to TODAY.
+             *
+             * Previous months:
+             * show complete calendar month.
+             */
+
+            var now = new Date();
+
+            var maxDay = totalDays;
+
+            if (
+                target.year === now.getFullYear() &&
+                target.month === now.getMonth() + 1
+            ) {
+
+                maxDay = now.getDate();
+
+            }
+
+            for (var day = 1; day <= maxDay; day++) {
+
+                var rx = 0;
+                var tx = 0;
+
+                /*
+                 * Search vnStat daily record for
+                 * this exact calendar date.
+                 */
+
+                data.days.forEach(function(d) {
+
+                    if (
+                        d.year === target.year &&
+                        d.month === target.month &&
+                        d.day === day
+                    ) {
+
+                        rx += Number(d.rx || 0);
+                        tx += Number(d.tx || 0);
+
+                    }
+
+                });
+
+                result.push({
+
+                    day: day,
+
+                    rx: rx,
+
+                    tx: tx,
+
+                    total: rx + tx
+
+                });
+            }
+
+            return result;
+        }
+
+        /* ====================================================
+         * DAILY TABLE
+         * ==================================================== */
+
+        function makeDailyTable(target) {
+
+            var dailyData =
+                getDailyData(target);
+
+            var table =
+                E('table', {
+                    'class':
+                        'netusage-daily-table'
+                });
+
+            /* Header */
+
+            table.appendChild(
+
+                E('thead', {}, [
+
+                    E('tr', {}, [
+
+                        E('th', {}, 'Date'),
+
+                        E('th', {}, 'Download'),
+
+                        E('th', {}, 'Upload'),
+
+                        E('th', {}, 'Total')
+
+                    ])
+
+                ])
+
+            );
+
+            var tbody =
+                E('tbody');
+
+            dailyData.forEach(function(item) {
+
+                tbody.appendChild(
+
+                    E('tr', {}, [
+
+                        E('td', {
+                            'class':
+                                'netusage-daily-date'
+                        }, [
+
+                            monthName(target.month)
+                                .substring(0, 3),
+
+                            ' ',
+
+                            String(item.day)
+                                .padStart(2, '0')
+
+                        ]),
+
+                        E('td', {},
+
+                            formatBytes(item.rx)
+
+                        ),
+
+                        E('td', {},
+
+                            formatBytes(item.tx)
+
+                        ),
+
+                        E('td', {
+                            'class':
+                                'netusage-daily-total'
+                        },
+
+                            formatBytes(item.total)
+
+                        )
+
+                    ])
+
+                );
+            });
+
+            table.appendChild(tbody);
+
+            return E('div', {
+
+                'class':
+                    'netusage-daily-table-wrapper'
+
+            }, table);
+        }
+
+        /* ====================================================
          * TABS
-         * ================================================== */
+         * ==================================================== */
 
         function renderTabs() {
 
             while (tabs.firstChild) {
-                tabs.removeChild(tabs.firstChild);
+
+                tabs.removeChild(
+                    tabs.firstChild
+                );
             }
 
             /* TODAY */
 
             tabs.appendChild(
+
                 E('button', {
 
                     'class':
@@ -716,16 +985,19 @@ return view.extend({
                         selectedTab = 'today';
 
                         renderCurrent();
+
                     }
 
                 }, '📅 Today')
+
             );
 
-            /* 3 MONTHS */
+            /* THREE MONTHS */
 
             for (var i = 0; i < 3; i++) {
 
-                var target = getTargetMonth(i);
+                var target =
+                    getTargetMonth(i);
 
                 var number = i + 1;
 
@@ -743,44 +1015,48 @@ return view.extend({
                                     : ''
                             ),
 
-                        'click': (function(index) {
+                        'click':
+                            (function(index) {
 
-                            return function() {
+                                return function() {
 
-                                selectedTab =
-                                    'month' +
-                                    (index + 1);
+                                    selectedTab =
+                                        'month' +
+                                        (index + 1);
 
-                                renderCurrent();
-                            };
+                                    renderCurrent();
 
-                        })(i)
+                                };
+
+                            })(i)
 
                     }, [
 
                         '📊 ',
 
-                        monthName(target.month),
+                        monthName(
+                            target.month
+                        ),
 
                         ' #',
 
                         String(number)
 
                     ])
+
                 );
             }
         }
 
-        /* ==================================================
-         * RENDER CONTENT
-         * ================================================== */
+        /* ====================================================
+         * MAIN RENDER
+         * ==================================================== */
 
         function renderCurrent() {
 
-            /*
-             * Extra protection against malformed data.
-             */
-            if (!data || typeof data !== 'object') {
+            /* Safety */
+
+            if (!data) {
 
                 data = {
                     days: [],
@@ -799,7 +1075,10 @@ return view.extend({
             renderTabs();
 
             while (content.firstChild) {
-                content.removeChild(content.firstChild);
+
+                content.removeChild(
+                    content.firstChild
+                );
             }
 
             var rx = 0;
@@ -813,13 +1092,55 @@ return view.extend({
 
             if (selectedTab === 'today') {
 
-                var today = getToday();
+                var today =
+                    getToday();
 
                 rx = today.rx;
                 tx = today.tx;
                 total = today.total;
 
                 heading = 'Today';
+
+                content.appendChild(
+
+                    E('div', {
+                        'class':
+                            'netusage-heading'
+                    }, heading)
+
+                );
+
+                content.appendChild(
+
+                    E('div', {
+                        'class':
+                            'netusage-cards'
+                    }, [
+
+                        makeCard(
+                            'Download',
+                            formatBytes(rx),
+                            'download-card',
+                            '📥'
+                        ),
+
+                        makeCard(
+                            'Upload',
+                            formatBytes(tx),
+                            'upload-card',
+                            '📤'
+                        ),
+
+                        makeCard(
+                            'Total',
+                            formatBytes(total),
+                            'total-card',
+                            '📊'
+                        )
+
+                    ])
+
+                );
 
             }
 
@@ -851,67 +1172,89 @@ return view.extend({
                     monthName(target.month) +
                     ' ' +
                     target.year;
+
+                /* ---------------------------------------------
+                 * MONTH SUMMARY
+                 * --------------------------------------------- */
+
+                content.appendChild(
+
+                    E('div', {
+                        'class':
+                            'netusage-heading'
+                    }, heading)
+
+                );
+
+                content.appendChild(
+
+                    E('div', {
+                        'class':
+                            'netusage-cards'
+                    }, [
+
+                        makeCard(
+                            'Download',
+                            formatBytes(rx),
+                            'download-card',
+                            '📥'
+                        ),
+
+                        makeCard(
+                            'Upload',
+                            formatBytes(tx),
+                            'upload-card',
+                            '📤'
+                        ),
+
+                        makeCard(
+                            'Total',
+                            formatBytes(total),
+                            'total-card',
+                            '📊'
+                        )
+
+                    ])
+
+                );
+
+                /* ---------------------------------------------
+                 * DAILY SECTION
+                 * --------------------------------------------- */
+
+                content.appendChild(
+
+                    E('div', {
+                        'class':
+                            'netusage-daily-title'
+                    }, 'Daily Usage')
+
+                );
+
+                content.appendChild(
+
+                    makeDailyTable(target)
+
+                );
             }
 
             /* =================================================
-             * HEADING
+             * REFRESH INFO
              * ================================================= */
 
             content.appendChild(
 
                 E('div', {
-                    'class': 'netusage-heading'
-                }, heading)
-
-            );
-
-            /* =================================================
-             * CARDS
-             * ================================================= */
-
-            content.appendChild(
-
-                E('div', {
-                    'class': 'netusage-cards'
-                }, [
-
-                    makeCard(
-                        'Download',
-                        formatBytes(rx),
-                        'download-card',
-                        '📥'
-                    ),
-
-                    makeCard(
-                        'Upload',
-                        formatBytes(tx),
-                        'upload-card',
-                        '📤'
-                    ),
-
-                    makeCard(
-                        'Total',
-                        formatBytes(total),
-                        'total-card',
-                        '📊'
-                    )
-
-                ])
-
-            );
-
-            content.appendChild(
-
-                E('div', {
-                    'class': 'netusage-updated'
+                    'class':
+                        'netusage-updated'
                 }, 'Auto refresh: every 20 seconds')
 
             );
         }
 
-        /* ==================================================
+        /* ====================================================
          * REFRESH
-         * ================================================== */
+         * ==================================================== */
 
         function refresh() {
 
@@ -920,9 +1263,12 @@ return view.extend({
                 .then(function(json) {
 
                     /*
-                     * Always rebuild data from fresh RPC JSON.
+                     * Always replace data with fresh
+                     * vnStat JSON.
                      */
-                    data = buildData(json);
+
+                    data =
+                        buildData(json);
 
                     renderCurrent();
 
@@ -931,9 +1277,10 @@ return view.extend({
                 .catch(function(err) {
 
                     /*
-                     * Do NOT destroy the current UI
-                     * if one RPC request fails.
+                     * Keep existing UI if one
+                     * RPC request fails.
                      */
+
                     console.error(
                         'NetUsage refresh failed:',
                         err
@@ -942,33 +1289,36 @@ return view.extend({
                 });
         }
 
-        /* ==================================================
+        /* ====================================================
          * INITIAL RENDER
-         * ================================================== */
+         * ==================================================== */
 
         renderCurrent();
 
-        /* ==================================================
-         * 20 SECOND REFRESH
-         * ================================================== */
+        /* ====================================================
+         * REFRESH EVERY 20 SECONDS
+         * ==================================================== */
 
-        this.refreshTimer = setInterval(
-            refresh,
-            20000
-        );
+        this.refreshTimer =
+            setInterval(
+                refresh,
+                20000
+            );
 
         return root;
     },
 
-    /* ======================================================
-     * CLEAN TIMER WHEN LEAVING PAGE
-     * ====================================================== */
+    /* ========================================================
+     * CLEAN TIMER
+     * ======================================================== */
 
     destroy: function() {
 
         if (this.refreshTimer) {
 
-            clearInterval(this.refreshTimer);
+            clearInterval(
+                this.refreshTimer
+            );
 
             this.refreshTimer = null;
         }
@@ -1096,7 +1446,24 @@ CFG
         fi
 
         # ----------------------------------------------------
-        # Create database if missing
+        # Daily records for 3-month daily view
+        # ----------------------------------------------------
+
+        if grep -q '^DailyDays' /etc/vnstat.conf; then
+
+            sed -i \
+                's|^DailyDays.*|DailyDays 93|' \
+                /etc/vnstat.conf
+
+        else
+
+            echo 'DailyDays 93' \
+                >> /etc/vnstat.conf
+
+        fi
+
+        # ----------------------------------------------------
+        # Create DB only if missing
         # ----------------------------------------------------
 
         if [ ! -e "/etc/vnstat/$WAN_IFACE" ]; then
@@ -1170,9 +1537,12 @@ ok "WAN interface: $WAN_IFACE"
 ok "Update interval: 20 seconds"
 ok "Poll interval: 5 seconds"
 ok "Save interval: 1 minute"
+ok "Daily history: 93 days"
 ok "UI refresh: 20 seconds"
 ok "Today tab enabled"
 ok "Latest 3 calendar months enabled"
+ok "Daily usage per calendar date enabled"
+ok "28/29/30/31 day calendar handling enabled"
 ok "Current month auto-created when empty"
 ok "Midnight daily/monthly rollover handled by vnStat"
 ok "Boot recovery service enabled"
