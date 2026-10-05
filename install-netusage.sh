@@ -434,35 +434,51 @@ function renderMonth(data, selectedKey) {
 
     html += '</div>';
 
-    html += '<div class="table cbi-section-table">';
+    /* ========================================================
+       Colourful Download / Upload / Total cards
+       ======================================================== */
 
-    html += '<div class="tr table-titles">';
+    html += '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:10px;">';
 
-    html += '<div class="th">Download</div>';
-    html += '<div class="th">Upload</div>';
-    html += '<div class="th">Total</div>';
+    /* Download */
 
-    html += '</div>';
+    html += '<div style="border:2px solid #2196f3;border-radius:12px;padding:16px;text-align:center;background:rgba(33,150,243,0.15);">';
 
-    html += '<div class="tr">';
+    html += '<div style="font-size:28px;">📥</div>';
 
-    html += '<div class="td">';
-    html += '<strong>' +
+    html += '<div style="font-weight:600;margin:6px 0;color:#42a5f5;">Download</div>';
+
+    html += '<strong style="font-size:20px;">' +
         formatBytes(rx) +
         '</strong>';
+
     html += '</div>';
 
-    html += '<div class="td">';
-    html += '<strong>' +
+    /* Upload */
+
+    html += '<div style="border:2px solid #4caf50;border-radius:12px;padding:16px;text-align:center;background:rgba(76,175,80,0.15);">';
+
+    html += '<div style="font-size:28px;">📤</div>';
+
+    html += '<div style="font-weight:600;margin:6px 0;color:#66bb6a;">Upload</div>';
+
+    html += '<strong style="font-size:20px;">' +
         formatBytes(tx) +
         '</strong>';
+
     html += '</div>';
 
-    html += '<div class="td">';
-    html += '<strong>' +
+    /* Total */
+
+    html += '<div style="border:2px solid #ff9800;border-radius:12px;padding:16px;text-align:center;background:rgba(255,152,0,0.15);">';
+
+    html += '<div style="font-size:28px;">📊</div>';
+
+    html += '<div style="font-weight:600;margin:6px 0;color:#ffa726;">Total</div>';
+
+    html += '<strong style="font-size:20px;">' +
         formatBytes(total) +
         '</strong>';
-    html += '</div>';
 
     html += '</div>';
 
@@ -546,7 +562,7 @@ return view.extend({
         refresh();
 
         /*
-         * Store the timer on the view instance so LuCI
+         * Store timer on the view instance so LuCI
          * can properly clear it when the view is removed.
          */
 
