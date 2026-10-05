@@ -129,15 +129,15 @@ else
 fi
 
 # ------------------------------------------------------------
-# Save every 1 minute
+# Save every 5 minute
 # ------------------------------------------------------------
 
 if grep -q '^SaveInterval' /etc/vnstat.conf; then
     sed -i \
-        's|^SaveInterval.*|SaveInterval 1|' \
+        's|^SaveInterval.*|SaveInterval 5|' \
         /etc/vnstat.conf
 else
-    echo 'SaveInterval 1' \
+    echo 'SaveInterval 5' \
         >> /etc/vnstat.conf
 fi
 
@@ -1429,18 +1429,18 @@ CFG
         fi
 
         # ----------------------------------------------------
-        # 1 minute save
+        # 5 minute save
         # ----------------------------------------------------
 
         if grep -q '^SaveInterval' /etc/vnstat.conf; then
 
             sed -i \
-                's|^SaveInterval.*|SaveInterval 1|' \
+                's|^SaveInterval.*|SaveInterval 5|' \
                 /etc/vnstat.conf
 
         else
 
-            echo 'SaveInterval 1' \
+            echo 'SaveInterval 5' \
                 >> /etc/vnstat.conf
 
         fi
@@ -1536,7 +1536,7 @@ ok "vnStat database: /etc/vnstat"
 ok "WAN interface: $WAN_IFACE"
 ok "Update interval: 20 seconds"
 ok "Poll interval: 5 seconds"
-ok "Save interval: 1 minute"
+ok "Save interval: 5 minute"
 ok "Daily history: 93 days"
 ok "UI refresh: 20 seconds"
 ok "Today tab enabled"
