@@ -3,7 +3,16 @@
 # ============================================================
 # NetUsage Installer for OpenWrt
 # vnStat + LuCI NetUsage
-# Persistent database + latest 3 calendar months UI
+#
+# Features:
+# - Persistent vnStat database
+# - WAN auto detection
+# - Today usage
+# - Latest 3 calendar months
+# - Colourful LuCI UI
+# - MB / GB / TB display
+# - RPCD backend
+# - Boot recovery
 # ============================================================
 
 set -e
@@ -138,7 +147,6 @@ EOF
 
 # ------------------------------------------------------------
 # RPCD backend
-# Object name = netusage
 # ------------------------------------------------------------
 
 mkdir -p /usr/libexec/rpcd
@@ -256,24 +264,36 @@ var callNetUsage = rpc.declare({
     expect: {}
 });
 
+/*
+ * vnStat 1.18 JSON reports traffic values in KiB.
+ * Convert them to bytes before formatting.
+ */
+var VNSTAT_UNIT = 1024;
+
+/* ============================================================
+   FORMAT MB / GB / TB ONLY
+   ============================================================ */
+
 function formatBytes(bytes) {
 
     bytes = Number(bytes || 0);
 
-    if (bytes >= 1024 * 1024 * 1024 * 1024)
-        return (bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB';
+    var MB = 1024 * 1024;
+    var GB = 1024 * 1024 * 1024;
+    var TB = 1024 * 1024 * 1024 * 1024;
 
-    if (bytes >= 1024 * 1024 * 1024)
-        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    if (bytes >= TB)
+        return (bytes / TB).toFixed(2) + ' TB';
 
-    if (bytes >= 1024 * 1024)
-        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    if (bytes >= GB)
+        return (bytes / GB).toFixed(2) + ' GB';
 
-    if (bytes >= 1024)
-        return (bytes / 1024).toFixed(2) + ' KB';
-
-    return bytes + ' B';
+    return (bytes / MB).toFixed(2) + ' MB';
 }
+
+/* ============================================================
+   MONTH NAME
+   ============================================================ */
 
 function monthName(year, month) {
 
@@ -285,14 +305,28 @@ function monthName(year, month) {
     });
 }
 
+/* ============================================================
+   MONTH KEY
+   ============================================================ */
+
 function monthKey(year, month) {
 
-    return year + '-' + String(month).padStart(2, '0');
+    return year + '-' +
+        String(month).padStart(2, '0');
 }
+
+/* ============================================================
+   PREVIOUS MONTH
+   ============================================================ */
 
 function previousMonth(year, month, offset) {
 
-    var date = new Date(year, month - 1 - offset, 1);
+    var date =
+        new Date(
+            year,
+            month - 1 - offset,
+            1
+        );
 
     return {
         year: date.getFullYear(),
@@ -300,17 +334,55 @@ function previousMonth(year, month, offset) {
     };
 }
 
-function renderMonth(data, selectedKey) {
+/* ============================================================
+   TODAY DATA
+   ============================================================ */
 
-    var now = new Date();
+function getTodayData(iface) {
 
-    var currentYear = now.getFullYear();
-    var currentMonth = now.getMonth() + 1;
+    var rx = 0;
+    var tx = 0;
 
-    var iface =
-        data &&
-        data.interfaces &&
-        data.interfaces[0];
+    /*
+     * vnStat days[0] = current calendar day.
+     * This gives the complete usage recorded today.
+     */
+
+    if (
+        iface &&
+        iface.traffic &&
+        Array.isArray(iface.traffic.days) &&
+        iface.traffic.days.length > 0
+    ) {
+
+        var today =
+            iface.traffic.days[0];
+
+        rx =
+            Number(today.rx || 0) *
+            VNSTAT_UNIT;
+
+        tx =
+            Number(today.tx || 0) *
+            VNSTAT_UNIT;
+
+    }
+
+    return {
+        rx: rx,
+        tx: tx
+    };
+}
+
+/* ============================================================
+   MONTHLY DATA
+   ============================================================ */
+
+function getMonthlyData(
+    iface,
+    currentYear,
+    currentMonth
+) {
 
     var vnstatMonths = [];
 
@@ -319,18 +391,42 @@ function renderMonth(data, selectedKey) {
         iface.traffic &&
         Array.isArray(iface.traffic.month)
     ) {
+
         vnstatMonths =
-            iface.traffic.month.slice();
+            iface.traffic.month.map(function(m) {
+
+                return {
+                    year:
+                        Number(
+                            m.date.year
+                        ),
+
+                    month:
+                        Number(
+                            m.date.month
+                        ),
+
+                    rx:
+                        Number(m.rx || 0) *
+                        VNSTAT_UNIT,
+
+                    tx:
+                        Number(m.tx || 0) *
+                        VNSTAT_UNIT
+                };
+
+            });
+
     }
 
-    /*
-     * Build exactly the latest 3 calendar months.
-     *
-     * This guarantees that a new month appears immediately,
-     * even when vnStat has not recorded any traffic yet.
-     */
-
     var months = [];
+
+    /*
+     * Exactly:
+     * 1 = current month
+     * 2 = previous month
+     * 3 = previous previous month
+     */
 
     for (var i = 0; i < 3; i++) {
 
@@ -343,19 +439,25 @@ function renderMonth(data, selectedKey) {
 
         var found = null;
 
-        vnstatMonths.forEach(function(m) {
+        vnstatMonths.forEach(
+            function(m) {
 
-            var y = Number(m.year);
-            var mo = Number(m.month);
+                if (
+                    m.year === target.year &&
+                    m.month === target.month
+                ) {
 
-            if (
-                y === target.year &&
-                mo === target.month
-            ) {
-                found = m;
+                    found = m;
+
+                }
+
             }
+        );
 
-        });
+        /*
+         * If the month has no data yet,
+         * create it with zero usage.
+         */
 
         if (!found) {
 
@@ -369,114 +471,143 @@ function renderMonth(data, selectedKey) {
         }
 
         months.push(found);
+
     }
 
-    var selected = null;
+    return months;
+}
 
-    months.forEach(function(m) {
+/* ============================================================
+   TAB STYLE
+   ============================================================ */
 
-        var year = Number(m.year);
-        var month = Number(m.month);
+function tabStyle(
+    color,
+    background,
+    active
+) {
 
-        if (monthKey(year, month) === selectedKey)
-            selected = m;
+    return [
+        'border:2px solid ' + color,
+        'border-radius:10px',
+        'padding:9px 16px',
+        'cursor:pointer',
+        'font-weight:600',
+        'font-size:14px',
+        'color:' +
+            (active ? '#ffffff' : color),
+        'background:' +
+            (active ? color : background),
+        'transition:all .2s ease'
+    ].join(';');
+}
 
-    });
+/* ============================================================
+   COLOURFUL USAGE CARDS
+   ============================================================ */
 
-    if (!selected)
-        selected = months[0];
+function renderCards(rx, tx) {
 
-    var rx = Number(selected.rx || 0);
-    var tx = Number(selected.tx || 0);
-
-    var total = rx + tx;
-
-    var selectedYear = Number(selected.year);
-    var selectedMonth = Number(selected.month);
-
-    var selectedMonthKey =
-        monthKey(
-            selectedYear,
-            selectedMonth
-        );
+    var total =
+        Number(rx || 0) +
+        Number(tx || 0);
 
     var html = '';
 
-    html += '<div class="cbi-section">';
+    html +=
+        '<div style="' +
+        'display:grid;' +
+        'grid-template-columns:' +
+        'repeat(3,minmax(0,1fr));' +
+        'gap:14px;' +
+        'margin-top:10px;' +
+        '">';
 
-    html += '<h2>Monthly Data Usage</h2>';
+    /* --------------------------------------------------------
+       DOWNLOAD
+       -------------------------------------------------------- */
 
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;">';
+    html +=
+        '<div style="' +
+        'border:2px solid #2196f3;' +
+        'border-radius:12px;' +
+        'padding:16px;' +
+        'text-align:center;' +
+        'background:rgba(33,150,243,0.15);' +
+        '">';
 
-    months.forEach(function(m, index) {
+    html +=
+        '<div style="font-size:28px;">📥</div>';
 
-        var year = Number(m.year);
-        var month = Number(m.month);
+    html +=
+        '<div style="' +
+        'font-weight:600;' +
+        'margin:6px 0;' +
+        'color:#42a5f5;' +
+        '">Download</div>';
 
-        var key =
-            monthKey(
-                year,
-                month
-            );
-
-        var active =
-            key === selectedMonthKey;
-
-        html +=
-            '<button class="cbi-button' +
-            (active ? ' cbi-button-positive' : '') +
-            '" data-month="' + key + '">' +
-            monthName(year, month) +
-            ' #' + (index + 1) +
-            '</button>';
-
-    });
-
-    html += '</div>';
-
-    /* ========================================================
-       Colourful Download / Upload / Total cards
-       ======================================================== */
-
-    html += '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:10px;">';
-
-    /* Download */
-
-    html += '<div style="border:2px solid #2196f3;border-radius:12px;padding:16px;text-align:center;background:rgba(33,150,243,0.15);">';
-
-    html += '<div style="font-size:28px;">📥</div>';
-
-    html += '<div style="font-weight:600;margin:6px 0;color:#42a5f5;">Download</div>';
-
-    html += '<strong style="font-size:20px;">' +
+    html +=
+        '<strong style="font-size:20px;">' +
         formatBytes(rx) +
         '</strong>';
 
     html += '</div>';
 
-    /* Upload */
+    /* --------------------------------------------------------
+       UPLOAD
+       -------------------------------------------------------- */
 
-    html += '<div style="border:2px solid #4caf50;border-radius:12px;padding:16px;text-align:center;background:rgba(76,175,80,0.15);">';
+    html +=
+        '<div style="' +
+        'border:2px solid #4caf50;' +
+        'border-radius:12px;' +
+        'padding:16px;' +
+        'text-align:center;' +
+        'background:rgba(76,175,80,0.15);' +
+        '">';
 
-    html += '<div style="font-size:28px;">📤</div>';
+    html +=
+        '<div style="font-size:28px;">📤</div>';
 
-    html += '<div style="font-weight:600;margin:6px 0;color:#66bb6a;">Upload</div>';
+    html +=
+        '<div style="' +
+        'font-weight:600;' +
+        'margin:6px 0;' +
+        'color:#66bb6a;' +
+        '">Upload</div>';
 
-    html += '<strong style="font-size:20px;">' +
+    html +=
+        '<strong style="font-size:20px;">' +
         formatBytes(tx) +
         '</strong>';
 
     html += '</div>';
 
-    /* Total */
+    /* --------------------------------------------------------
+       TOTAL
+       -------------------------------------------------------- */
 
-    html += '<div style="border:2px solid #ff9800;border-radius:12px;padding:16px;text-align:center;background:rgba(255,152,0,0.15);">';
+    html +=
+        '<div style="' +
+        'border:2px solid #ff9800;' +
+        'border-radius:12px;' +
+        'padding:16px;' +
+        'text-align:center;' +
+        'background:rgba(255,152,0,0.15);' +
+        '">';
 
-    html += '<div style="font-size:28px;">📊</div>';
+    html +=
+        '<div style="font-size:28px;">📊</div>';
 
-    html += '<div style="font-weight:600;margin:6px 0;color:#ffa726;">Total</div>';
+    html +=
+        '<div style="' +
+        'font-weight:600;' +
+        'margin:6px 0;' +
+        'color:#ffa726;' +
+        '">Total</div>';
 
-    html += '<strong style="font-size:20px;">' +
+    html +=
+        '<strong style="font-size:20px;">' +
         formatBytes(total) +
         '</strong>';
 
@@ -484,10 +615,245 @@ function renderMonth(data, selectedKey) {
 
     html += '</div>';
 
+    return html;
+}
+
+/* ============================================================
+   MAIN RENDER
+   ============================================================ */
+
+function renderUsage(
+    data,
+    selectedKey
+) {
+
+    var now = new Date();
+
+    var currentYear =
+        now.getFullYear();
+
+    var currentMonth =
+        now.getMonth() + 1;
+
+    var iface =
+        data &&
+        data.interfaces &&
+        data.interfaces[0];
+
+    var months =
+        getMonthlyData(
+            iface,
+            currentYear,
+            currentMonth
+        );
+
+    var today =
+        getTodayData(iface);
+
+    var html = '';
+
+    html +=
+        '<div class="cbi-section">';
+
+    html +=
+        '<h2>Data Usage</h2>';
+
+    /* ========================================================
+       TABS
+       ======================================================== */
+
+    html +=
+        '<div style="' +
+        'display:flex;' +
+        'gap:8px;' +
+        'flex-wrap:wrap;' +
+        'margin-bottom:20px;' +
+        '">';
+
+    /*
+     * TODAY TAB
+     */
+
+    var todayActive =
+        selectedKey === 'today';
+
+    html +=
+        '<button ' +
+        'data-month="today" ' +
+        'style="' +
+        tabStyle(
+            '#ab47bc',
+            'rgba(171,71,188,0.12)',
+            todayActive
+        ) +
+        '">';
+
+    html += '🕐 Today';
+
+    html += '</button>';
+
+    /*
+     * MONTH TAB COLOURS
+     */
+
+    var tabColors = [
+
+        {
+            color: '#2196f3',
+            bg: 'rgba(33,150,243,0.12)'
+        },
+
+        {
+            color: '#4caf50',
+            bg: 'rgba(76,175,80,0.12)'
+        },
+
+        {
+            color: '#ff9800',
+            bg: 'rgba(255,152,0,0.12)'
+        }
+
+    ];
+
+    /*
+     * MONTH TABS
+     */
+
+    months.forEach(
+        function(m, index) {
+
+            var year =
+                Number(m.year);
+
+            var month =
+                Number(m.month);
+
+            var key =
+                monthKey(
+                    year,
+                    month
+                );
+
+            var active =
+                key === selectedKey;
+
+            html +=
+                '<button ' +
+                'data-month="' +
+                key +
+                '" ' +
+                'style="' +
+                tabStyle(
+                    tabColors[index].color,
+                    tabColors[index].bg,
+                    active
+                ) +
+                '">';
+
+            html +=
+                monthName(
+                    year,
+                    month
+                ) +
+                ' #' +
+                (index + 1);
+
+            html += '</button>';
+
+        }
+    );
+
+    html += '</div>';
+
+    /* ========================================================
+       TODAY VIEW
+       ======================================================== */
+
+    if (selectedKey === 'today') {
+
+        html +=
+            '<div style="' +
+            'margin-bottom:12px;' +
+            'font-size:16px;' +
+            'font-weight:600;' +
+            '">';
+
+        html +=
+            '🕐 Today — 24 Hour Usage';
+
+        html += '</div>';
+
+        html +=
+            renderCards(
+                today.rx,
+                today.tx
+            );
+
+    }
+
+    /* ========================================================
+       MONTH VIEW
+       ======================================================== */
+
+    else {
+
+        var selected = null;
+
+        months.forEach(
+            function(m) {
+
+                var key =
+                    monthKey(
+                        Number(m.year),
+                        Number(m.month)
+                    );
+
+                if (
+                    key === selectedKey
+                ) {
+
+                    selected = m;
+
+                }
+
+            }
+        );
+
+        if (!selected)
+            selected = months[0];
+
+        html +=
+            '<div style="' +
+            'margin-bottom:12px;' +
+            'font-size:16px;' +
+            'font-weight:600;' +
+            '">';
+
+        html +=
+            '📅 ' +
+            monthName(
+                Number(selected.year),
+                Number(selected.month)
+            );
+
+        html += '</div>';
+
+        html +=
+            renderCards(
+                Number(selected.rx || 0),
+                Number(selected.tx || 0)
+            );
+
+    }
+
     html += '</div>';
 
     return html;
 }
+
+/* ============================================================
+   LUCI VIEW
+   ============================================================ */
 
 return view.extend({
 
@@ -499,71 +865,84 @@ return view.extend({
 
     render: function() {
 
-        var root = E('div', {
-            'class': 'cbi-map'
-        });
+        var root =
+            E('div', {
+                'class': 'cbi-map'
+            });
 
-        var selectedKey = null;
+        /*
+         * Default tab = Today
+         */
+
+        var selectedKey =
+            'today';
 
         function bindButtons() {
 
             root.querySelectorAll(
                 '[data-month]'
-            ).forEach(function(button) {
+            ).forEach(
+                function(button) {
 
-                button.addEventListener(
-                    'click',
-                    function() {
+                    button.addEventListener(
+                        'click',
+                        function() {
 
-                        selectedKey =
-                            button.getAttribute(
-                                'data-month'
-                            );
+                            selectedKey =
+                                button.getAttribute(
+                                    'data-month'
+                                );
 
-                        refresh();
+                            refresh();
 
-                    }
-                );
+                        }
+                    );
 
-            });
+                }
+            );
 
         }
 
         function refresh() {
 
             return callNetUsage()
-                .then(function(data) {
 
-                    root.innerHTML =
-                        renderMonth(
-                            data,
-                            selectedKey
+                .then(
+                    function(data) {
+
+                        root.innerHTML =
+                            renderUsage(
+                                data,
+                                selectedKey
+                            );
+
+                        bindButtons();
+
+                    }
+                )
+
+                .catch(
+                    function(error) {
+
+                        root.innerHTML =
+                            '<div class="alert-message">' +
+                            'Unable to load data usage.' +
+                            '</div>';
+
+                        console.error(
+                            'NetUsage RPC error:',
+                            error
                         );
 
-                    bindButtons();
-
-                })
-                .catch(function(error) {
-
-                    root.innerHTML =
-                        '<div class="alert-message">' +
-                        'Unable to load data usage.' +
-                        '</div>';
-
-                    console.error(
-                        'NetUsage RPC error:',
-                        error
-                    );
-
-                });
+                    }
+                );
 
         }
 
         refresh();
 
         /*
-         * Store timer on the view instance so LuCI
-         * can properly clear it when the view is removed.
+         * Auto refresh every 10 seconds
          */
 
         this.refreshTimer =
@@ -576,11 +955,21 @@ return view.extend({
 
     },
 
+    /*
+     * Properly stop refresh timer
+     * when LuCI view is removed.
+     */
+
     remove: function() {
 
         if (this.refreshTimer) {
-            clearInterval(this.refreshTimer);
+
+            clearInterval(
+                this.refreshTimer
+            );
+
             this.refreshTimer = null;
+
         }
 
     },
@@ -685,8 +1074,11 @@ rm -rf /tmp/luci-modulecache* 2>/dev/null || true
 ok "NetUsage installed"
 ok "vnStat database: /etc/vnstat"
 ok "WAN interface: $WAN_IFACE"
+ok "Today usage enabled"
 ok "Latest 3 calendar months enabled"
 ok "Current month auto-created when empty"
+ok "MB / GB / TB display enabled"
+ok "Colourful UI enabled"
 ok "Boot recovery service enabled"
 
 exit 0
