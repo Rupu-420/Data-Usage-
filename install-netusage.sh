@@ -3,7 +3,7 @@
 # ============================================================
 # NetUsage Installer for OpenWrt
 # vnStat + LuCI NetUsage
-# Persistent database + latest 3 months UI
+# Persistent database + latest 3 calendar months UI
 # ============================================================
 
 set -e
@@ -67,7 +67,6 @@ log "WAN interface: $WAN_IFACE"
 
 mkdir -p /etc/vnstat
 
-# Configure persistent database directory
 if [ -f /etc/vnstat.conf ]; then
 
     if grep -q '^DatabaseDir' /etc/vnstat.conf; then
@@ -78,9 +77,11 @@ if [ -f /etc/vnstat.conf ]; then
     fi
 
 else
+
     cat > /etc/vnstat.conf <<'EOF'
 DatabaseDir "/etc/vnstat"
 EOF
+
 fi
 
 # ------------------------------------------------------------
@@ -93,20 +94,26 @@ if [ -d /var/lib/vnstat ]; then
 
     for DB in /var/lib/vnstat/*; do
         [ -f "$DB" ] || continue
+
         cp -f "$DB" /etc/vnstat/ 2>/dev/null || true
     done
 
 fi
 
 # ------------------------------------------------------------
-# Create database for WAN interface
+# Create vnStat database
 # ------------------------------------------------------------
 
 if ! vnstat --iflist 2>/dev/null | grep -qw "$WAN_IFACE"; then
+
     log "Creating vnStat database for $WAN_IFACE..."
+
     vnstat --create -i "$WAN_IFACE" 2>/dev/null || true
+
 else
+
     log "vnStat database already exists for $WAN_IFACE"
+
 fi
 
 # ------------------------------------------------------------
@@ -131,6 +138,7 @@ EOF
 
 # ------------------------------------------------------------
 # RPCD backend
+# Object name = netusage
 # ------------------------------------------------------------
 
 mkdir -p /usr/libexec/rpcd
@@ -143,17 +151,39 @@ IFACE="$(uci -q get netusage.main.interface)"
 [ -z "$IFACE" ] && IFACE="eth1"
 
 case "$1" in
+
     list)
-        echo '{"read":["*"]}'
+
+        echo '{"read":{}}'
+
         ;;
 
-    read)
-        vnstat -i "$IFACE" --json 2>/dev/null
+    call)
+
+        case "$2" in
+
+            read)
+
+                vnstat -i "$IFACE" --json 2>/dev/null
+
+                ;;
+
+            *)
+
+                exit 1
+
+                ;;
+
+        esac
+
         ;;
 
     *)
+
         exit 1
+
         ;;
+
 esac
 EOF
 
@@ -171,7 +201,7 @@ cat > /usr/share/rpcd/acl.d/luci-app-netusage.json <<'EOF'
         "description": "NetUsage",
         "read": {
             "ubus": {
-                "luci.netusage": [
+                "netusage": [
                     "read"
                 ]
             },
@@ -215,17 +245,19 @@ mkdir -p /www/luci-static/resources/view
 
 cat > /www/luci-static/resources/view/netusage.js <<'EOF'
 'use strict';
+
 'require view';
 'require rpc';
 'require ui';
 
 var callNetUsage = rpc.declare({
-    object: 'luci.netusage',
+    object: 'netusage',
     method: 'read',
     expect: {}
 });
 
 function formatBytes(bytes) {
+
     bytes = Number(bytes || 0);
 
     if (bytes >= 1024 * 1024 * 1024 * 1024)
@@ -244,6 +276,7 @@ function formatBytes(bytes) {
 }
 
 function monthName(year, month) {
+
     var date = new Date(year, month - 1, 1);
 
     return date.toLocaleString('default', {
@@ -253,27 +286,90 @@ function monthName(year, month) {
 }
 
 function monthKey(year, month) {
+
     return year + '-' + String(month).padStart(2, '0');
+}
+
+function previousMonth(year, month, offset) {
+
+    var date = new Date(year, month - 1 - offset, 1);
+
+    return {
+        year: date.getFullYear(),
+        month: date.getMonth() + 1
+    };
 }
 
 function renderMonth(data, selectedKey) {
 
-    var iface = data.interfaces && data.interfaces[0];
+    var now = new Date();
 
-    if (!iface || !iface.traffic || !iface.traffic.month)
-        return '<div class="alert-message">No usage data available.</div>';
+    var currentYear = now.getFullYear();
+    var currentMonth = now.getMonth() + 1;
 
-    var months = iface.traffic.month.slice();
+    var iface =
+        data &&
+        data.interfaces &&
+        data.interfaces[0];
 
-    months.sort(function(a, b) {
-        var ka = Number(a.date || 0);
-        var kb = Number(b.date || 0);
+    var vnstatMonths = [];
 
-        return kb - ka;
-    });
+    if (
+        iface &&
+        iface.traffic &&
+        Array.isArray(iface.traffic.month)
+    ) {
+        vnstatMonths =
+            iface.traffic.month.slice();
+    }
 
-    /* Only latest 3 months */
-    months = months.slice(0, 3);
+    /*
+     * Build exactly the latest 3 calendar months.
+     *
+     * This guarantees that a new month appears immediately,
+     * even when vnStat has not recorded any traffic yet.
+     */
+
+    var months = [];
+
+    for (var i = 0; i < 3; i++) {
+
+        var target =
+            previousMonth(
+                currentYear,
+                currentMonth,
+                i
+            );
+
+        var found = null;
+
+        vnstatMonths.forEach(function(m) {
+
+            var y = Number(m.year);
+            var mo = Number(m.month);
+
+            if (
+                y === target.year &&
+                mo === target.month
+            ) {
+                found = m;
+            }
+
+        });
+
+        if (!found) {
+
+            found = {
+                year: target.year,
+                month: target.month,
+                rx: 0,
+                tx: 0
+            };
+
+        }
+
+        months.push(found);
+    }
 
     var selected = null;
 
@@ -284,18 +380,25 @@ function renderMonth(data, selectedKey) {
 
         if (monthKey(year, month) === selectedKey)
             selected = m;
+
     });
 
-    if (!selected && months.length)
-        selected = months[0];
-
     if (!selected)
-        return '<div class="alert-message">No monthly usage data.</div>';
+        selected = months[0];
 
     var rx = Number(selected.rx || 0);
     var tx = Number(selected.tx || 0);
 
     var total = rx + tx;
+
+    var selectedYear = Number(selected.year);
+    var selectedMonth = Number(selected.month);
+
+    var selectedMonthKey =
+        monthKey(
+            selectedYear,
+            selectedMonth
+        );
 
     var html = '';
 
@@ -310,17 +413,23 @@ function renderMonth(data, selectedKey) {
         var year = Number(m.year);
         var month = Number(m.month);
 
-        var key = monthKey(year, month);
+        var key =
+            monthKey(
+                year,
+                month
+            );
 
-        var active = key === selectedKey ||
-            (!selectedKey && index === 0);
+        var active =
+            key === selectedMonthKey;
 
-        html += '<button class="cbi-button' +
+        html +=
+            '<button class="cbi-button' +
             (active ? ' cbi-button-positive' : '') +
             '" data-month="' + key + '">' +
             monthName(year, month) +
             ' #' + (index + 1) +
             '</button>';
+
     });
 
     html += '</div>';
@@ -328,28 +437,37 @@ function renderMonth(data, selectedKey) {
     html += '<div class="table cbi-section-table">';
 
     html += '<div class="tr table-titles">';
+
     html += '<div class="th">Download</div>';
     html += '<div class="th">Upload</div>';
     html += '<div class="th">Total</div>';
+
     html += '</div>';
 
     html += '<div class="tr">';
 
     html += '<div class="td">';
-    html += '<strong>' + formatBytes(rx) + '</strong>';
+    html += '<strong>' +
+        formatBytes(rx) +
+        '</strong>';
     html += '</div>';
 
     html += '<div class="td">';
-    html += '<strong>' + formatBytes(tx) + '</strong>';
+    html += '<strong>' +
+        formatBytes(tx) +
+        '</strong>';
     html += '</div>';
 
     html += '<div class="td">';
-    html += '<strong>' + formatBytes(total) + '</strong>';
+    html += '<strong>' +
+        formatBytes(total) +
+        '</strong>';
     html += '</div>';
 
     html += '</div>';
 
     html += '</div>';
+
     html += '</div>';
 
     return html;
@@ -358,52 +476,91 @@ function renderMonth(data, selectedKey) {
 return view.extend({
 
     load: function() {
+
         return callNetUsage();
+
     },
 
-    render: function(data) {
+    render: function() {
 
         var root = E('div', {
             'class': 'cbi-map'
         });
 
         var selectedKey = null;
+        var refreshTimer = null;
+
+        function bindButtons() {
+
+            root.querySelectorAll(
+                '[data-month]'
+            ).forEach(function(button) {
+
+                button.addEventListener(
+                    'click',
+                    function() {
+
+                        selectedKey =
+                            button.getAttribute(
+                                'data-month'
+                            );
+
+                        refresh();
+
+                    }
+                );
+
+            });
+
+        }
 
         function refresh() {
 
-            return callNetUsage().then(function(newData) {
+            return callNetUsage()
+                .then(function(data) {
 
-                root.innerHTML = renderMonth(
-                    newData,
-                    selectedKey
-                );
+                    root.innerHTML =
+                        renderMonth(
+                            data,
+                            selectedKey
+                        );
 
-                root.querySelectorAll(
-                    '[data-month]'
-                ).forEach(function(button) {
+                    bindButtons();
 
-                    button.addEventListener('click', function() {
+                })
+                .catch(function(error) {
 
-                        selectedKey =
-                            button.getAttribute('data-month');
+                    root.innerHTML =
+                        '<div class="alert-message">' +
+                        'Unable to load data usage.' +
+                        '</div>';
 
-                        refresh();
-                    });
+                    console.error(
+                        'NetUsage RPC error:',
+                        error
+                    );
+
                 });
-            });
+
         }
 
         refresh();
 
-        /* Refresh usage automatically */
-        L.bind(
-            function() {
-                refresh();
-            },
-            this
-        );
+        refreshTimer =
+            setInterval(
+                refresh,
+                10000
+            );
 
         return root;
+
+    },
+
+    remove: function() {
+
+        if (this.refreshTimer)
+            clearInterval(this.refreshTimer);
+
     },
 
     handleSaveApply: null,
@@ -443,18 +600,32 @@ start() {
         if [ -f /etc/vnstat.conf ]; then
 
             if grep -q '^DatabaseDir' /etc/vnstat.conf; then
-                sed -i 's|^DatabaseDir.*|DatabaseDir "/etc/vnstat"|' \
+
+                sed -i \
+                    's|^DatabaseDir.*|DatabaseDir "/etc/vnstat"|' \
                     /etc/vnstat.conf
+
             else
-                echo 'DatabaseDir "/etc/vnstat"' >> /etc/vnstat.conf
+
+                echo 'DatabaseDir "/etc/vnstat"' \
+                    >> /etc/vnstat.conf
+
             fi
 
         else
-            echo 'DatabaseDir "/etc/vnstat"' > /etc/vnstat.conf
+
+            echo 'DatabaseDir "/etc/vnstat"' \
+                > /etc/vnstat.conf
+
         fi
 
-        if ! vnstat --iflist 2>/dev/null | grep -qw "$WAN_IFACE"; then
-            vnstat --create -i "$WAN_IFACE" 2>/dev/null || true
+        if ! vnstat --iflist 2>/dev/null \
+            | grep -qw "$WAN_IFACE"; then
+
+            vnstat --create \
+                -i "$WAN_IFACE" \
+                2>/dev/null || true
+
         fi
 
         uci set netusage.main.interface="$WAN_IFACE"
@@ -492,7 +663,8 @@ rm -rf /tmp/luci-modulecache* 2>/dev/null || true
 ok "NetUsage installed"
 ok "vnStat database: /etc/vnstat"
 ok "WAN interface: $WAN_IFACE"
-ok "Latest 3 months enabled"
+ok "Latest 3 calendar months enabled"
+ok "Current month auto-created when empty"
 ok "Boot recovery service enabled"
 
 exit 0
