@@ -488,7 +488,6 @@ return view.extend({
         });
 
         var selectedKey = null;
-        var refreshTimer = null;
 
         function bindButtons() {
 
@@ -546,7 +545,12 @@ return view.extend({
 
         refresh();
 
-        refreshTimer =
+        /*
+         * Store the timer on the view instance so LuCI
+         * can properly clear it when the view is removed.
+         */
+
+        this.refreshTimer =
             setInterval(
                 refresh,
                 10000
@@ -558,8 +562,10 @@ return view.extend({
 
     remove: function() {
 
-        if (this.refreshTimer)
+        if (this.refreshTimer) {
             clearInterval(this.refreshTimer);
+            this.refreshTimer = null;
+        }
 
     },
 
