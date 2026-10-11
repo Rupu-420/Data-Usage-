@@ -1,3 +1,4 @@
+
 #!/bin/sh
 
 # ============================================================
@@ -39,10 +40,28 @@ fi
 # DETECT WAN
 # ============================================================
 
-WAN_IFACE="$(
-    ubus call network.interface.wan status 2>/dev/null \
-    | jsonfilter -e '@.l3_device' 2>/dev/null || true
-)"
+WAN_IFACE=""
+
+# Preserve the configured interface if its database exists.
+CURRENT_IFACE="$(uci -q get netusage.main.interface 2>/dev/null || true)"
+
+if [ -n "$CURRENT_IFACE" ] &&
+   [ -e "/etc/vnstat/$CURRENT_IFACE" ]; then
+    WAN_IFACE="$CURRENT_IFACE"
+fi
+
+# Preserve the existing WAN database.
+if [ -z "$WAN_IFACE" ] && [ -e /etc/vnstat/wan ]; then
+    WAN_IFACE="wan"
+fi
+
+# Detect WAN layer-3 device if no existing database was found.
+if [ -z "$WAN_IFACE" ]; then
+    WAN_IFACE="$(
+        ubus call network.interface.wan status 2>/dev/null \
+        | jsonfilter -e '@.l3_device' 2>/dev/null || true
+    )"
+fi
 
 if [ -z "$WAN_IFACE" ]; then
     WAN_IFACE="$(
@@ -51,7 +70,7 @@ if [ -z "$WAN_IFACE" ]; then
     )"
 fi
 
-[ -z "$WAN_IFACE" ] && WAN_IFACE="eth1"
+[ -z "$WAN_IFACE" ] && WAN_IFACE="wan"
 
 log "WAN interface: $WAN_IFACE"
 
@@ -196,7 +215,7 @@ cat > /usr/libexec/rpcd/netusage <<'EOF'
 
 IFACE="$(uci -q get netusage.main.interface)"
 
-[ -z "$IFACE" ] && IFACE="eth1"
+[ -z "$IFACE" ] && IFACE="wan"
 
 case "$1" in
 
@@ -1349,21 +1368,36 @@ start() {
     (
         sleep 15
 
-        WAN_IFACE="$(
-            ubus call network.interface.wan status 2>/dev/null \
-            | jsonfilter -e '@.l3_device' 2>/dev/null || true
+        WAN_IFACE=""
+
+        CURRENT_IFACE="$(
+            uci -q get netusage.main.interface 2>/dev/null || true
         )"
 
-        if [ -z "$WAN_IFACE" ]; then
+        if [ -n "$CURRENT_IFACE" ] &&
+           [ -e "/etc/vnstat/$CURRENT_IFACE" ]; then
+            WAN_IFACE="$CURRENT_IFACE"
+        fi
 
+        if [ -z "$WAN_IFACE" ] && [ -e /etc/vnstat/wan ]; then
+            WAN_IFACE="wan"
+        fi
+
+        if [ -z "$WAN_IFACE" ]; then
+            WAN_IFACE="$(
+                ubus call network.interface.wan status 2>/dev/null \
+                | jsonfilter -e '@.l3_device' 2>/dev/null || true
+            )"
+        fi
+
+        if [ -z "$WAN_IFACE" ]; then
             WAN_IFACE="$(
                 ip route 2>/dev/null \
                 | awk '/^default/ {print $5; exit}'
             )"
-
         fi
 
-        [ -z "$WAN_IFACE" ] && WAN_IFACE="eth1"
+        [ -z "$WAN_IFACE" ] && WAN_IFACE="wan"
 
         mkdir -p /etc/vnstat
 
